@@ -1,77 +1,74 @@
 from flask import Flask, request, jsonify
 import sqlite3
-import threading
+import os
 
 app = Flask(__name__)
 
-DB_FILE = "users.db"
-db_lock = threading.Lock()  # 🔒 защита от одновременной записи
-
+DB_PATH = "users.db"
 
 def get_db():
-    return sqlite3.connect(DB_FILE, timeout=10)
-
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def init_db():
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                username TEXT PRIMARY KEY,
-                password TEXT NOT NULL
-            )
-        """)
-        conn.commit()
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            login TEXT UNIQUE,
+            password TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
 
+init_db()
+
+@app.route("/")
+def home():
+    return "Auth server is running"
 
 @app.route("/register", methods=["POST"])
 def register():
-    data = request.get_json()
-    username = data.get("username", "").strip()
-    password = data.get("password", "").strip()
+    data = request.json
+    login = data.get("login")
+    password = data.get("password")
 
-    if not username or not password:
-        return jsonify({"status": "error", "message": "Пустые данные"}), 400
+    if not login or not password:
+        return jsonify({"error": "missing data"}), 400
 
-    with db_lock:
-        try:
-            with get_db() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "INSERT INTO users (username, password) VALUES (?, ?)",
-                    (username, password)
-                )
-                conn.commit()
-            return jsonify({"status": "ok"}), 200
-
-        except sqlite3.IntegrityError:
-            return jsonify({"status": "error", "message": "Пользователь уже существует"}), 400
-
-        except Exception as e:
-            return jsonify({"status": "error", "message": str(e)}), 500
-
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO users (login, password) VALUES (?, ?)",
+            (login, password)
+        )
+        conn.commit()
+        return jsonify({"status": "registered"})
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "user exists"}), 409
+    finally:
+        conn.close()
 
 @app.route("/login", methods=["POST"])
 def login():
-    data = request.get_json()
-    username = data.get("username", "").strip()
-    password = data.get("password", "").strip()
+    data = request.json
+    login = data.get("login")
+    password = data.get("password")
 
-    with db_lock:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT * FROM users WHERE username=? AND password=?",
-                (username, password)
-            )
-            user = cursor.fetchone()
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM users WHERE login=? AND password=?",
+        (login, password)
+    )
+    user = cursor.fetchone()
+    conn.close()
 
     if user:
-        return jsonify({"status": "ok"}), 200
+        return jsonify({"status": "ok"})
     else:
-        return jsonify({"status": "error", "message": "Неверный логин или пароль"}), 401
-
-
-if __name__ == "__main__":
-    init_db()
-    app.run(host="127.0.0.1", port=5000, debug=True)
+        return jsonify({"error": "invalid credentials"}), 401
